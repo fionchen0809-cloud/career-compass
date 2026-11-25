@@ -18,7 +18,7 @@ jobs:
           python-version: '3.11'
       - run: |
           pip install playwright
-          playwright install chromium
+          playwright install --with-deps chromium
       - run: python fetch_104.py
       - run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
