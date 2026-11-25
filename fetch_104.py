@@ -19,78 +19,86 @@ def extract_skills(text):
     return found if found else ["跨部門協作", "需求分析", "專案管理"]
 
 
-def parse_years(period_desc):
-    m = re.search(r"(\d+)", str(period_desc or ""))
-    return int(m.group(1)) if m else 0
+def parse_salary(salary_text):
+    nums = [int(n.replace(",", "")) for n in re.findall(r"[\d,]+", salary_text or "")]
+    nums = [n for n in nums if n >= 20000]
+    if not nums:
+        return None, None
+    return min(nums), max(nums)
 
 
-def scrape_with_browser(page, keyword, role_label):
-    captured_items = []
-
-    def handle_response(response):
-        if "/jobs/search/api/jobs" in response.url or "/jobs/search/list" in response.url:
-            try:
-                data = response.json()
-                items = data.get("data", {}).get("list", [])
-                if not items and isinstance(data.get("data"), list):
-                    items = data.get("data", [])
-                captured_items.extend(items)
-            except Exception:
-                pass
-
-    page.on("response", handle_response)
+def scrape_dom_jobs(page, keyword, role_label):
     url = f"https://www.104.com.tw/jobs/search/?ro=1&keyword={quote(keyword)}&order=15&asc=0"
-    try:
-        page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(5000)
-    except Exception as e:
-        print(f"載入 {keyword} 頁面時發生異常: {e}")
-    finally:
-        page.remove_listener("response", handle_response)
+    page.goto(url, wait_until="domcontentloaded", timeout=30000)
+    page.wait_for_timeout(4000)
+    page.mouse.wheel(0, 2500)
+    page.wait_for_timeout(3000)
 
-    print(f"[{keyword}] 攔截到 {len(captured_items)} 筆原始資料")
+    # 直接從網頁畫面上所有職缺連結與區塊提取資料
+    raw_jobs = page.evaluate("""() => {
+        const links = Array.from(document.querySelectorAll('a[href*="/job/"]'));
+        const seen = new Set();
+        const items = [];
+        for (const a of links) {
+            const href = a.href || '';
+            const match = href.match(/\\/job\\/([a-zA-Z0-9]+)/);
+            if (!match || seen.has(match[1])) continue;
+            const title = (a.innerText || '').trim();
+            if (!title || title.length < 2) continue;
+            seen.add(match[1]);
+
+            const card = a.closest('article, .job-list-item, [data-job-no], div[class*="job"]') || a.parentElement?.parentElement;
+            const cardText = card ? card.innerText : title;
+            const compLink = card ? card.querySelector('a[href*="/company/"]') : null;
+            const company = compLink ? compLink.innerText.trim() : '104 企業徵才';
+
+            items.push({
+                code: match[1],
+                url: href.split('?')[0],
+                title: title,
+                company: company,
+                fullText: cardText
+            });
+        }
+        return items.slice(0, 25);
+    }""")
+
+    print(f"[{keyword}] 從網頁畫面成功提取 {len(raw_jobs)} 筆職缺")
 
     results = []
-    for item in captured_items:
-        if str(item.get("jobType")) == "1":
-            continue
-        raw_id = str(item.get("jobNo") or item.get("id") or "0")
-        job_id = int(re.sub(r"\D", "", raw_id) or 0)
-        if not job_id:
-            continue
+    for idx, item in enumerate(raw_jobs):
+        full_text = item["fullText"]
+        # 轉換職缺代碼為數字 ID
+        numeric_id = int(re.sub(r"\D", "", item["code"]) or 0)
+        if numeric_id < 1000:
+            numeric_id = abs(hash(item["code"])) % 100000000
 
-        addr = item.get("jobAddrNoDesc", "")
-        city = addr[:3] if len(addr) >= 3 else "台北市"
-        salary_low = item.get("salaryLow")
-        salary_high = item.get("salaryHigh")
-        min_pay = int(salary_low) if salary_low and int(salary_low) > 0 else None
-        max_pay = int(salary_high) if salary_high and int(salary_high) >= (min_pay or 0) else min_pay
+        city_match = re.search(r"(台北市|新北市|桃園市|台中市|台南市|高雄市|新竹市|新竹縣|基隆市|苗栗縣|彰化縣|南投縣|雲林縣|嘉義市|嘉義縣|屏東縣|宜蘭縣|花蓮縣|台東縣|澎湖縣|金門縣|連江縣)", full_text)
+        city = city_match.group(1) if city_match else "台北市"
 
-        desc = item.get("description", "") or ""
-        title = item.get("jobName", "")
-        skills = extract_skills(title + " " + desc)
+        min_pay, max_pay = parse_salary(full_text)
+        years_match = re.search(r"(\d+)\s*年以上", full_text)
+        years = int(years_match.group(1)) if years_match else 0
 
-        link_obj = item.get("link", {})
-        job_url = link_obj.get("job", "") if isinstance(link_obj, dict) else str(link_obj)
-        if job_url and not job_url.startswith("http"):
-            job_url = "https:" + job_url
+        skills = extract_skills(item["title"] + " " + full_text)
+        clean_jd = " ".join(full_text.split())[:300]
 
         results.append({
-            "id": job_id,
+            "id": numeric_id,
             "sourceType": "104",
-            "title": title,
-            "company": item.get("custName", ""),
+            "title": item["title"],
+            "company": item["company"],
             "city": city,
             "min": min_pay,
             "max": max_pay,
             "role": role_label,
-            "years": parse_years(item.get("periodDesc", "")),
+            "years": years,
             "skills": skills,
             "evidence": [f"職務說明提及 {s}" for s in skills],
-            "mode": "遠端" if "遠端" in desc else ("混合辦公" if "混合" in desc else "現場"),
-            "type": "實習" if "實習" in title else "全職",
-            "url": job_url,
-            "jd": desc[:300] + ("..." if len(desc) > 300 else ""),
+            "mode": "遠端" if "遠端" in full_text else ("混合辦公" if "混合" in full_text else "現場"),
+            "type": "實習" if "實習" in item["title"] else "全職",
+            "url": item["url"],
+            "jd": clean_jd,
         })
     return results
 
@@ -104,8 +112,8 @@ if __name__ == "__main__":
             locale="zh-TW",
         )
         page = context.new_page()
-        pm_jobs = scrape_with_browser(page, "產品經理 PM", "PM")
-        pjm_jobs = scrape_with_browser(page, "專案經理 PjM", "PJM")
+        pm_jobs = scrape_dom_jobs(page, "產品經理 PM", "PM")
+        pjm_jobs = scrape_dom_jobs(page, "專案經理 PjM", "PJM")
         browser.close()
 
     all_jobs = {j["id"]: j for j in (pm_jobs + pjm_jobs)}
@@ -122,4 +130,4 @@ if __name__ == "__main__":
             "sources": {"104": {"status": "connected" if job_list else "empty", "count": len(job_list)}},
         }, f, ensure_ascii=False, indent=2)
 
-    print(f"成功更新 {len(job_list)} 筆職缺至 data/jobs.json")
+    print(f"=== 最終結果：成功更新 {len(job_list)} 筆職缺至 data/jobs.json ===")
