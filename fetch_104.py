@@ -29,12 +29,13 @@ def parse_salary(salary_text):
 
 def scrape_dom_jobs(page, keyword, role_label):
     url = f"https://www.104.com.tw/jobs/search/?ro=1&keyword={quote(keyword)}&order=15&asc=0"
-    page.goto(url, wait_until="domcontentloaded", timeout=30000)
-    page.wait_for_timeout(4000)
-    page.mouse.wheel(0, 2500)
+    page.goto(url, wait_until="domcontentloaded", timeout=35000)
+    page.wait_for_timeout(5000)
+    print(f"[{keyword}] 實際開啟網頁標題: {page.title()}")
+
+    page.mouse.wheel(0, 3000)
     page.wait_for_timeout(3000)
 
-    # 直接從網頁畫面上所有職缺連結與區塊提取資料
     raw_jobs = page.evaluate("""() => {
         const links = Array.from(document.querySelectorAll('a[href*="/job/"]'));
         const seen = new Set();
@@ -66,14 +67,16 @@ def scrape_dom_jobs(page, keyword, role_label):
     print(f"[{keyword}] 從網頁畫面成功提取 {len(raw_jobs)} 筆職缺")
 
     results = []
-    for idx, item in enumerate(raw_jobs):
+    for item in raw_jobs:
         full_text = item["fullText"]
-        # 轉換職缺代碼為數字 ID
         numeric_id = int(re.sub(r"\D", "", item["code"]) or 0)
         if numeric_id < 1000:
             numeric_id = abs(hash(item["code"])) % 100000000
 
-        city_match = re.search(r"(台北市|新北市|桃園市|台中市|台南市|高雄市|新竹市|新竹縣|基隆市|苗栗縣|彰化縣|南投縣|雲林縣|嘉義市|嘉義縣|屏東縣|宜蘭縣|花蓮縣|台東縣|澎湖縣|金門縣|連江縣)", full_text)
+        city_match = re.search(
+            r"(台北市|新北市|桃園市|台中市|台南市|高雄市|新竹市|新竹縣|基隆市|苗栗縣|彰化縣|南投縣|雲林縣|嘉義市|嘉義縣|屏東縣|宜蘭縣|花蓮縣|台東縣|澎湖縣|金門縣|連江縣)",
+            full_text,
+        )
         city = city_match.group(1) if city_match else "台北市"
 
         min_pay, max_pay = parse_salary(full_text)
@@ -106,11 +109,18 @@ def scrape_dom_jobs(page, keyword, role_label):
 if __name__ == "__main__":
     os.makedirs("data", exist_ok=True)
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-            locale="zh-TW",
+        # 加上反自動化偵測參數，偽裝為一般使用者瀏覽器
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
         )
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+            locale="zh-TW",
+            viewport={"width": 1366, "height": 768},
+        )
+        context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+
         page = context.new_page()
         pm_jobs = scrape_dom_jobs(page, "產品經理 PM", "PM")
         pjm_jobs = scrape_dom_jobs(page, "專案經理 PjM", "PJM")
